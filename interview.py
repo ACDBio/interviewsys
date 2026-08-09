@@ -10,15 +10,15 @@ Real-time interview transcriber (offline, multi-GPU)
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"  # БЕЗ ТЕСЛЫ
 os.environ["PYANNOTE_DISABLE_TORCHCODEC"] = "1"
+
 import warnings
 
 # Скрывает конкретное предупреждение от pyannote
 warnings.filterwarnings(
     "ignore", 
     message=".*TensorFloat-32.*", 
-    category=UserWarning # или попробуйте Warning, если не сработает
+    category=UserWarning
 )
-
 
 import sys
 import queue
@@ -85,7 +85,6 @@ def parse_device(device_str: str):
             return "cuda", int(device_str.split(":")[1])
         return "cuda", 0
     return "cpu", 0
-
 
 # ============================================================
 # ===  ЭКСПОРТ ТРАНСКРИПТА ВО ВСЕ ФОРМАТЫ  ====================
@@ -219,7 +218,7 @@ player.addEventListener('timeupdate', () => {{
   document.querySelectorAll('tr.row').forEach(r=>{{
     const s=parseFloat(r.dataset.start), e=parseFloat(r.dataset.end);
     r.style.background = (t>=s && t<e) ? '#1e2a44' : '';
-  }});
+}});
 }});
 </script>
 </body>
@@ -240,7 +239,6 @@ def save_all_formats(segments: list[dict], session_dir: Path, basename: str, aud
     save_html_player(segments, audio_filename, session_dir / f"{basename}.html", title=basename)
     # намеренно без print — чтобы не спамить форматами в терминал
 
-
 # ============================================================
 # ===  STREAMING  =============================================
 # ============================================================
@@ -256,6 +254,7 @@ class StreamingProcessor:
         min_seg_dur: float = 0.5,
         forced_language: str = None,
         session_dir: Path | None = None,
+        num_speakers: int | None = None,  # <-- НОВЫЙ ПАРАМЕТР
     ):
         print(f"🎙  Whisper -> {whisper_device}, model={whisper_dir}")
         self.whisper = whisper.load_model(whisper_dir, device=whisper_device)
@@ -278,6 +277,12 @@ class StreamingProcessor:
         self.session_dir = Path(session_dir) if session_dir else None
         self.session_start_wall = dt.datetime.now()
         self._live_counter = 0
+        
+        # НОВОЕ: ограничение на число спикеров
+        self.num_speakers = num_speakers
+        if num_speakers:
+            print(f"👥 Ограничение: максимум {num_speakers} спикер(ов)")
+        
         self._warmup()
 
     def _warmup(self):
@@ -301,16 +306,24 @@ class StreamingProcessor:
             sid = "SPEAKER_00"
             self.speakers.append({"id": sid, "centroid": emb.copy(), "count": 1})
             return sid
+        
         best_sim, best = -1.0, None
         for s in self.speakers:
             sim = self._cos(emb, s["centroid"])
             if sim > best_sim:
                 best_sim, best = sim, s
+        
         if best_sim >= self.sim_thr:
             n = best["count"]
             best["centroid"] = (best["centroid"] * n + emb) / (n + 1)
             best["count"] = n + 1
             return best["id"]
+        
+        # НОВОЕ: не создаём нового спикера если достигнут лимит
+        if self.num_speakers and len(self.speakers) >= self.num_speakers:
+            # Присваиваем к ближайшему существующему
+            return best["id"]
+        
         sid = f"SPEAKER_{len(self.speakers):02d}"
         self.speakers.append({"id": sid, "centroid": emb.copy(), "count": 1})
         return sid
@@ -328,7 +341,6 @@ class StreamingProcessor:
         try:
             use_lang = self.forced_language if self.forced_language else self.language
 
-            # ОСТАВЛЯЕМ информирование как было, но без дубля формата времени
             with self._print_lock:
                 print(f"🔍 Чанк: lang={use_lang}, файл={chunk_wav_path} | оффсет {sec_to_hms(chunk_start_time)}")
 
@@ -339,7 +351,6 @@ class StreamingProcessor:
                     language=None,
                     task="transcribe",
                     condition_on_previous_text=False,
-                #    initial_prompt="Речь будет только на русском!",
                 )
                 if self.language is None:
                     self.language = result.get("language")
@@ -352,7 +363,6 @@ class StreamingProcessor:
                     language=use_lang,
                     task="transcribe",
                     condition_on_previous_text=False,
-                  #  initial_prompt="Речь будет только на русском!",
                 )
 
             segments = result.get("segments", [])
@@ -389,7 +399,6 @@ class StreamingProcessor:
                 self.transcript.append(entry)
                 new_entries += 1
                 with self._print_lock:
-                    # ИЗМЕНЕНО: только один формат времени
                     print(f"[{sec_to_hms(s_g)} - {sec_to_hms(e_g)}] {speaker}: {text}")
 
             if new_entries > 0:
@@ -400,7 +409,6 @@ class StreamingProcessor:
             print(f"⚠️  chunk error: {e}")
             import traceback
             traceback.print_exc()
-
 
 def record_and_stream(
     session_dir: Path,
@@ -439,7 +447,6 @@ def record_and_stream(
     worker_thread = threading.Thread(target=worker, daemon=True)
     worker_thread.start()
 
-    # ВОССТАНОВЛЕНО как было
     print("🔴 Запись пошла. Enter — стоп.\n")
     print(f"   Сессия: {session_dir.resolve()}")
     print(f"   Live-транскрипт будет обновляться в: {session_dir / 'transcript_live.txt'}")
@@ -484,7 +491,6 @@ def record_and_stream(
         print(f"\n💾 Аудио сохранено: {audio_path} ({len(full)/SAMPLE_RATE:.2f}с)")
         return audio_path
 
-
 def merge_consecutive(transcript: list[dict]) -> list[dict]:
     out = []
     for s in transcript:
@@ -494,7 +500,6 @@ def merge_consecutive(transcript: list[dict]) -> list[dict]:
         else:
             out.append(dict(s))
     return out
-
 
 def install_argos(argos_dir: str):
     p = Path(argos_dir)
@@ -508,7 +513,6 @@ def install_argos(argos_dir: str):
         except Exception as e:
             print(f"⚠️  argos ({pkg.name}): {e}")
 
-
 def translate_segments(segments: list[dict], src_lang: str) -> list[dict]:
     installed = argostranslate.translate.get_installed_languages()
     src = next((l for l in installed if l.code == src_lang), None)
@@ -518,15 +522,14 @@ def translate_segments(segments: list[dict], src_lang: str) -> list[dict]:
     tr = src.get_translation(tgt)
     return [{**s, "text": tr.translate(s["text"])} for s in segments]
 
-
 def full_pipeline(
     audio_path: Path,
     whisper_model_dir: str,
     pyannote_config: str,
     whisper_device: str,
     pyannote_device: str,
+    num_speakers: int | None = None,  # <-- НОВЫЙ ПАРАМЕТР
 ):
-    # ВОССТАНОВЛЕНО информирование
     print(f"🎙  [full] Whisper -> {whisper_device}")
     whisper_model = whisper.load_model(whisper_model_dir, device=whisper_device)
     print("📝 Полная транскрипция...")
@@ -534,12 +537,20 @@ def full_pipeline(
     segs = [{"start": float(s["start"]), "end": float(s["end"]), "text": s["text"].strip()} for s in result.get("segments", [])]
     lang = result.get("language")
     print(f"🌐 Язык: {lang} — {len(segs)} сегментов до диаризации")
+    
     print(f"👥 [full] Pyannote diarization -> {pyannote_device}")
     from pyannote.audio import Pipeline
     pipeline = Pipeline.from_pretrained(pyannote_config)
     if pyannote_device.startswith("cuda"):
         pipeline.to(torch.device(pyannote_device))
-    diar = pipeline(str(audio_path))
+    
+    # НОВОЕ: передаём num_speakers в pyannote
+    diarization_params = {}
+    if num_speakers:
+        diarization_params["num_speakers"] = num_speakers
+        print(f"👥 Фиксированное число спикеров: {num_speakers}")
+    
+    diar = pipeline(str(audio_path), **diarization_params)
     turns = [(t.start, t.end, spk) for t, _, spk in diar.itertracks(yield_label=True)]
 
     def assign(a: float, b: float) -> str:
@@ -552,11 +563,9 @@ def full_pipeline(
 
     labeled = [{**s, "speaker": assign(s["start"], s["end"])} for s in segs]
     merged = merge_consecutive(labeled)
-    # ИЗМЕНЕНО: только один формат времени
     for s in merged:
         print(f"[{sec_to_hms(s['start'])} - {sec_to_hms(s['end'])}] {s['speaker']}: {s['text']}")
     return lang, merged
-
 
 def main():
     parser = argparse.ArgumentParser(description="Real-time interview transcriber (offline, multi-GPU) — с таймкодами для поиска в аудио")
@@ -573,7 +582,22 @@ def main():
     parser.add_argument("--sim-threshold", type=float, default=0.5)
     parser.add_argument("--refine", action="store_true", help="После записи сделать финальный точный проход (full_pipeline)")
     parser.add_argument("--language", default=None, help="Принудительно указать язык (напр. 'ru')")
+    # НОВЫЕ АРГУМЕНТЫ:
+    parser.add_argument("--num-speakers", type=int, default=2, 
+                        help="Точное число спикеров (напр. 1 если говоришь одна, 2 для интервью)")
+    parser.add_argument("--max-speakers", type=int, default=None,
+                        help="Максимальное число спикеров (не больше чем)")
     args = parser.parse_args()
+
+    # Определяем финальное ограничение
+    num_speakers = args.num_speakers
+    max_speakers = args.max_speakers
+    
+    if num_speakers:
+        print(f"👥 Режим: ровно {num_speakers} спикер(ов)")
+    elif max_speakers:
+        print(f"👥 Режим: не более {max_speakers} спикер(ов)")
+        num_speakers = max_speakers  # Используем как ограничение
 
     name = args.name or dt.datetime.now().strftime("interview_%Y%m%d_%H%M%S")
     session_dir = Path(args.out_dir) / name
@@ -584,7 +608,11 @@ def main():
         audio_path = session_dir / "audio.wav"
         subprocess.run(["ffmpeg", "-y", "-i", args.input, "-ar", str(SAMPLE_RATE), "-ac", "1", str(audio_path)], check=True, capture_output=True)
         print(f"✅ Аудио: {audio_path}")
-        lang, labeled = full_pipeline(audio_path, args.whisper_model, args.pyannote_config, args.whisper_device, args.pyannote_device)
+        lang, labeled = full_pipeline(
+            audio_path, args.whisper_model, args.pyannote_config, 
+            args.whisper_device, args.pyannote_device,
+            num_speakers=num_speakers  # <-- ПЕРЕДАЁМ
+        )
     else:
         processor = StreamingProcessor(
             whisper_dir=args.whisper_model,
@@ -594,6 +622,7 @@ def main():
             similarity_threshold=args.sim_threshold,
             forced_language=args.language,
             session_dir=session_dir,
+            num_speakers=num_speakers,  # <-- ПЕРЕДАЁМ
         )
         stop_event = threading.Event()
         def wait_for_enter():
@@ -606,15 +635,18 @@ def main():
         audio_path = record_and_stream(session_dir, processor, stop_event, args.chunk_sec)
         print("\n⏹  Запись остановлена.")
 
-        if args.refine:
-            print("🛠  Финальный проход (более точный, медленнее)...")
-            lang, labeled = full_pipeline(audio_path, args.whisper_model, args.pyannote_config, args.whisper_device, args.pyannote_device)
-        else:
-            lang = processor.language or args.language or "en"
-            labeled = merge_consecutive(processor.transcript)
-            print(f"📝 Streaming-сегментов: {len(labeled)}")
+    if args.refine:
+        print("🛠  Финальный проход (более точный, медленнее)...")
+        lang, labeled = full_pipeline(
+            audio_path, args.whisper_model, args.pyannote_config, 
+            args.whisper_device, args.pyannote_device,
+            num_speakers=num_speakers  # <-- ПЕРЕДАЁМ
+        )
+    else:
+        lang = processor.language or args.language or "en"
+        labeled = merge_consecutive(processor.transcript)
+        print(f"📝 Streaming-сегментов: {len(labeled)}")
 
-    # Сохранение — тихо
     save_all_formats(labeled, session_dir, "transcript_original", audio_filename="audio.wav")
 
     if lang == "en":
@@ -627,9 +659,7 @@ def main():
         except Exception as e:
             print(f"⚠️  перевод: {e}")
 
-    # Оставлено краткое информирование, без спама форматами
     print(f"\n🎉 Готово: {session_dir.resolve()}")
-
 
 if __name__ == "__main__":
     main()
